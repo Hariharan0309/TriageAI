@@ -9,6 +9,7 @@ from vertexai import agent_engines
 import json
 import requests
 from datetime import datetime
+from vertexai.generative_models import Content, Part
 
 # --- Configuration ---
 PROJECT_ID = os.environ.get("GCP_PROJECT", "valued-mediator-461216-k7")
@@ -85,9 +86,267 @@ def TriageAI_Login(req: https_fn.Request) -> https_fn.Response:
         if not session_id:
              raise Exception("Failed to get or create a session ID.")
 
-        response_data = json.dumps({"session_id": session_id, "state": session_state})
+        tickets_info = []
+        if 'tickets' in session_state and session_state['tickets']:
+            db = firestore.Client(project="valued-mediator-461216-k7", database="triageai")
+            for ticket_id in session_state['tickets']:
+                ticket_ref = db.collection('tickets').document(ticket_id)
+                ticket_doc = ticket_ref.get()
+                if ticket_doc.exists:
+                    ticket_data = ticket_doc.to_dict()
+                    if 'last_update_time' in ticket_data and hasattr(ticket_data['last_update_time'], 'isoformat'):
+                        ticket_data['last_update_time'] = ticket_data['last_update_time'].isoformat()
+                    tickets_info.append(ticket_data)
+
+        response_data_dict = {"session_id": session_id, "state": session_state}
+        if tickets_info:
+            response_data_dict['tickets'] = tickets_info
+        
+        response_data = json.dumps(response_data_dict)
         return https_fn.Response(response_data, mimetype="application/json", headers=headers)
 
     except Exception as e:
         print(f"An error occurred in create_session: {e}")
+        return https_fn.Response(f"An internal error occurred: {e}", status=500, headers=headers)
+
+@https_fn.on_request()
+def raise_query(req: https_fn.Request) -> https_fn.Response:
+    """
+    HTTP Cloud Function to send a query to the agent and retrieve its response and updated session state.
+    """
+    # Set CORS headers for the preflight OPTIONS request.
+    if req.method == "OPTIONS":
+        headers = {
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type, Authorization",
+            "Access-Control-Max-Age": "3600",
+        }
+        return https_fn.Response("", headers=headers, status=204)
+
+    # Set CORS headers for the main request.
+    headers = {
+        "Access-Control-Allow-Origin": "*",
+    }
+    try:
+        request_json = req.get_json(silent=True)
+        if not request_json or 'user_query' not in request_json or 'session_id' not in request_json or 'user_id' not in request_json:
+            return https_fn.Response("Error: Please provide 'user_query', 'session_id', and 'user_id' in the JSON body.", status=400, headers=headers)
+
+        user_query = request_json['user_query']
+        session_id = request_json['session_id']
+        user_id = request_json['user_id']
+
+        remote_app = get_remote_app()
+
+        # Get the session state before the query
+        initial_session = remote_app.get_session(user_id=user_id, session_id=session_id)
+        initial_state = initial_session.get('state', {})
+        initial_tickets = set(initial_state.get('tickets', []))
+
+        # Construct message for the agent
+        from vertexai.generative_models import Content, Part
+        final_message = Content(parts=[Part.from_text(user_query)], role="user").to_dict()
+
+        print(f"Streaming query to agent for session '{session_id}'...")
+        response_chunks = []
+        for event in remote_app.stream_query(user_id=user_id, session_id=session_id, message=final_message):
+            if event.get('content') and event.get('content').get('parts'):
+                for part in event['content']['parts']:
+                    if part.get('text'):
+                        response_chunks.append(part['text'])
+
+        full_response_text = "".join(response_chunks)
+        print(f"Agent response: {full_response_text}")
+
+        # Get the updated session state
+        updated_session = remote_app.get_session(user_id=user_id, session_id=session_id)
+        updated_state = updated_session.get('state', {})
+        updated_tickets = set(updated_state.get('tickets', []))
+
+        new_ticket_ids = updated_tickets - initial_tickets
+        new_ticket_info = None
+        if new_ticket_ids:
+            new_ticket_id = new_ticket_ids.pop()
+            db = firestore.Client(project="valued-mediator-461216-k7", database="triageai")
+            ticket_ref = db.collection('tickets').document(new_ticket_id)
+            ticket_doc = ticket_ref.get()
+            if ticket_doc.exists:
+                new_ticket_info = ticket_doc.to_dict()
+                if 'last_update_time' in new_ticket_info and hasattr(new_ticket_info['last_update_time'], 'isoformat'):
+                    new_ticket_info['last_update_time'] = new_ticket_info['last_update_time'].isoformat()
+
+        if new_ticket_info and 'interaction_id' in new_ticket_info:
+            interaction_id = new_ticket_info['interaction_id']
+            db = firestore.Client(project="valued-mediator-461216-k7", database="triageai")
+            interaction_ref = db.collection('interactions').document(interaction_id)
+            agent_message = {
+                "author": "agent",
+                "content": full_response_text,
+                "timestamp": datetime.now(),
+            }
+            interaction_ref.update({"messages": firestore.ArrayUnion([agent_message])})
+
+        response_data_dict = {
+            "agent_response": full_response_text,
+            "session_state": updated_state
+        }
+        if new_ticket_info:
+            response_data_dict['new_ticket'] = new_ticket_info
+        
+        response_data = json.dumps(response_data_dict)
+        return https_fn.Response(response_data, mimetype="application/json", headers=headers)
+
+    except Exception as e:
+        print(f"An error occurred in raise_query: {e}")
+        return https_fn.Response(f"An internal error occurred: {e}", status=500, headers=headers)
+
+@https_fn.on_request()
+def interact(req: https_fn.Request) -> https_fn.Response:
+    """
+    HTTP Cloud Function to interact with the agent about a specific ticket.
+    """
+    # Set CORS headers
+    if req.method == "OPTIONS":
+        headers = {
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type, Authorization",
+            "Access-Control-Max-Age": "3600",
+        }
+        return https_fn.Response("", headers=headers, status=204)
+
+    headers = {
+        "Access-Control-Allow-Origin": "*",
+    }
+
+    try:
+        request_json = req.get_json(silent=True)
+        if not request_json or not all(k in request_json for k in ['ticket_id', 'user_id', 'session_id', 'user_query']):
+            return https_fn.Response("Error: Please provide 'ticket_id', 'user_id', 'session_id', and 'user_query' in the JSON body.", status=400, headers=headers)
+
+        ticket_id = request_json['ticket_id']
+        user_id = request_json['user_id']
+        session_id = request_json['session_id']
+        user_query = request_json['user_query']
+
+        db = firestore.Client(project="valued-mediator-461216-k7", database="triageai")
+
+        # Get the interaction_id from the ticket
+        ticket_ref = db.collection('tickets').document(ticket_id)
+        ticket_doc = ticket_ref.get()
+        if not ticket_doc.exists:
+            return https_fn.Response(f"Error: Ticket with ID {ticket_id} not found.", status=404, headers=headers)
+        
+        interaction_id = ticket_doc.to_dict().get('interaction_id')
+        if not interaction_id:
+            return https_fn.Response(f"Error: Interaction ID not found for ticket {ticket_id}.", status=500, headers=headers)
+
+        interaction_ref = db.collection('interactions').document(interaction_id)
+
+        # Save user's query
+        user_message = {
+            "author": "user",
+            "content": user_query,
+            "timestamp": datetime.now(),
+        }
+        interaction_ref.update({"messages": firestore.ArrayUnion([user_message])})
+
+        # Update the working_ticket in the session state
+        session_ref = db.collection(SESSIONS_COLLECTION).document(session_id)
+        session_ref.update({"state.working_ticket": ticket_id})
+
+        # Formulate the prompt
+        prompt = f"For ticket {ticket_id}, answer this query: {user_query}"
+
+        remote_app = get_remote_app()
+
+        # Construct message for the agent
+        final_message = Content(parts=[Part.from_text(prompt)], role="user").to_dict()
+
+        print(f"Streaming query to agent for session '{session_id}' about ticket '{ticket_id}'...")
+        response_chunks = []
+        for event in remote_app.stream_query(user_id=user_id, session_id=session_id, message=final_message):
+            if event.get('content') and event.get('content').get('parts'):
+                for part in event['content']['parts']:
+                    if part.get('text'):
+                        response_chunks.append(part['text'])
+
+        full_response_text = "".join(response_chunks)
+        print(f"Agent response: {full_response_text}")
+
+        # Save agent's response
+        agent_message = {
+            "author": "agent",
+            "content": full_response_text,
+            "timestamp": datetime.now(),
+        }
+        interaction_ref.update({"messages": firestore.ArrayUnion([agent_message])})
+
+        response_data = json.dumps({
+            "agent_response": full_response_text
+        })
+        return https_fn.Response(response_data, mimetype="application/json", headers=headers)
+
+    except Exception as e:
+        print(f"An error occurred in interact: {e}")
+        return https_fn.Response(f"An internal error occurred: {e}", status=500, headers=headers)
+
+@https_fn.on_request()
+def get_interaction_history(req: https_fn.Request) -> https_fn.Response:
+    """
+    HTTP Cloud Function to get the interaction history for a specific ticket.
+    """
+    # Set CORS headers
+    if req.method == "OPTIONS":
+        headers = {
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type, Authorization",
+            "Access-Control-Max-Age": "3600",
+        }
+        return https_fn.Response("", headers=headers, status=204)
+
+    headers = {
+        "Access-Control-Allow-Origin": "*",
+    }
+
+    try:
+        request_json = req.get_json(silent=True)
+        if not request_json or 'ticket_id' not in request_json:
+            return https_fn.Response("Error: Please provide 'ticket_id' in the JSON body.", status=400, headers=headers)
+
+        ticket_id = request_json['ticket_id']
+
+        db = firestore.Client(project="valued-mediator-461216-k7", database="triageai")
+
+        # Get the interaction_id from the ticket
+        ticket_ref = db.collection('tickets').document(ticket_id)
+        ticket_doc = ticket_ref.get()
+        if not ticket_doc.exists:
+            return https_fn.Response(f"Error: Ticket with ID {ticket_id} not found.", status=404, headers=headers)
+        
+        interaction_id = ticket_doc.to_dict().get('interaction_id')
+        if not interaction_id:
+            return https_fn.Response(f"Error: Interaction ID not found for ticket {ticket_id}.", status=500, headers=headers)
+
+        # Get the interaction history
+        interaction_ref = db.collection('interactions').document(interaction_id)
+        interaction_doc = interaction_ref.get()
+        if not interaction_doc.exists:
+            return https_fn.Response(f"Error: Interaction history not found for interaction ID {interaction_id}.", status=404, headers=headers)
+
+        interaction_data = interaction_doc.to_dict()
+
+        # Convert timestamps to strings
+        if 'messages' in interaction_data:
+            for message in interaction_data['messages']:
+                if 'timestamp' in message and hasattr(message['timestamp'], 'isoformat'):
+                    message['timestamp'] = message['timestamp'].isoformat()
+
+        response_data = json.dumps(interaction_data)
+        return https_fn.Response(response_data, mimetype="application/json", headers=headers)
+
+    except Exception as e:
+        print(f"An error occurred in get_interaction_history: {e}")
         return https_fn.Response(f"An internal error occurred: {e}", status=500, headers=headers)

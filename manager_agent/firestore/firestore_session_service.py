@@ -63,10 +63,14 @@ class FirestoreSessionService(BaseSessionService):
             raise ValueError("User-provided session ID is not supported.")
 
         def _create_in_firestore():
+            initial_state = state or {}
+            if 'user_id' not in initial_state:
+                initial_state['user_id'] = user_id
+
             session_data = {
                 "app_name": app_name,
                 "user_id": user_id,
-                "state": state or {},
+                "state": initial_state,
                 "createTime": firestore.SERVER_TIMESTAMP,
                 "updateTime": firestore.SERVER_TIMESTAMP,
             }
@@ -204,8 +208,14 @@ class FirestoreSessionService(BaseSessionService):
                 # Add the event creation to the batch.
                 batch.set(event_doc_ref, event_data_dict)
 
-                # Update the session document's timestamp. State is no longer saved here.
-                batch.update(session_ref, {"updateTime": firestore.SERVER_TIMESTAMP})
+                # Update the session document's timestamp and state.
+                batch.update(
+                    session_ref,
+                    {
+                        "updateTime": firestore.SERVER_TIMESTAMP,
+                        "state": session.state,
+                    },
+                )
                 # Commit the batch.
                 logger.info("Committing batch to Firestore for session '%s'...", session.id)
                 batch.commit()

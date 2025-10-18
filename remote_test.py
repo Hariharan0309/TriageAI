@@ -13,7 +13,7 @@ initial_state = {
 }
 
 USER_ID = "technician_test_001"
-PROMPT = "what can you do?"
+PROMPT = "my visual studio code is not working"
         
 
 
