@@ -284,7 +284,7 @@ def interact(req: https_fn.Request) -> https_fn.Response:
         interaction_ref.update({"messages": firestore.ArrayUnion([agent_message])})
 
         response_data = json.dumps({
-            "agent_response": full_response_text
+            "agent_response": agent_message
         })
         return https_fn.Response(response_data, mimetype="application/json", headers=headers)
 
@@ -295,7 +295,7 @@ def interact(req: https_fn.Request) -> https_fn.Response:
 @https_fn.on_request()
 def get_interaction_history(req: https_fn.Request) -> https_fn.Response:
     """
-    HTTP Cloud Function to get the interaction history for a specific ticket.
+    HTTP Cloud Function to get the interaction history for a specific interaction ID.
     """
     # Set CORS headers
     if req.method == "OPTIONS":
@@ -313,22 +313,12 @@ def get_interaction_history(req: https_fn.Request) -> https_fn.Response:
 
     try:
         request_json = req.get_json(silent=True)
-        if not request_json or 'ticket_id' not in request_json:
-            return https_fn.Response("Error: Please provide 'ticket_id' in the JSON body.", status=400, headers=headers)
+        if not request_json or 'interaction_id' not in request_json:
+            return https_fn.Response("Error: Please provide 'interaction_id' in the JSON body.", status=400, headers=headers)
 
-        ticket_id = request_json['ticket_id']
+        interaction_id = request_json['interaction_id']
 
         db = firestore.Client(project="valued-mediator-461216-k7", database="triageai")
-
-        # Get the interaction_id from the ticket
-        ticket_ref = db.collection('tickets').document(ticket_id)
-        ticket_doc = ticket_ref.get()
-        if not ticket_doc.exists:
-            return https_fn.Response(f"Error: Ticket with ID {ticket_id} not found.", status=404, headers=headers)
-        
-        interaction_id = ticket_doc.to_dict().get('interaction_id')
-        if not interaction_id:
-            return https_fn.Response(f"Error: Interaction ID not found for ticket {ticket_id}.", status=500, headers=headers)
 
         # Get the interaction history
         interaction_ref = db.collection('interactions').document(interaction_id)
