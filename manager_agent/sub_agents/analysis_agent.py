@@ -6,7 +6,7 @@ from google.cloud import firestore
 db = firestore.Client(project="valued-mediator-461216-k7", database="triageai")
 
 def current_ticket_information(tool_context: ToolContext) -> dict:
-    """Gets the information for the current ticket from Firestore.
+    """Gets the information for the current ticket and its interaction history from Firestore.
 
     Returns:
         A dictionary containing the ticket information, or an error message.
@@ -31,6 +31,19 @@ def current_ticket_information(tool_context: ToolContext) -> dict:
     # Convert timestamp to string
     if 'last_update_time' in ticket_data and hasattr(ticket_data['last_update_time'], 'isoformat'):
         ticket_data['last_update_time'] = ticket_data['last_update_time'].isoformat()
+
+    # Fetch interaction history
+    interaction_id = ticket_data.get('interaction_id')
+    if interaction_id:
+        interaction_ref = db.collection('interactions').document(interaction_id)
+        interaction_doc = interaction_ref.get()
+        if interaction_doc.exists:
+            interaction_data = interaction_doc.to_dict()
+            ticket_data['interaction_history'] = interaction_data
+        else:
+            ticket_data['interaction_history'] = "Interaction history not found."
+    else:
+        ticket_data['interaction_history'] = "No interaction ID found in the ticket."
         
     return ticket_data
 
