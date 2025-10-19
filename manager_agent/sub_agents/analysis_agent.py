@@ -1,6 +1,7 @@
 from google.adk.agents import Agent
 from google.adk.tools.tool_context import ToolContext
 from google.cloud import firestore
+from .delegation_agent import delegation_agent
 
 # Initialize the Firestore client
 db = firestore.Client(project="valued-mediator-461216-k7", database="triageai")
@@ -55,6 +56,8 @@ analysis_agent = Agent(
     Use the `current_ticket_information` tool to get the details of the ticket you are working on. 
     Based on the ticket information and the user's query, provide a step-by-step solution if possible. 
     If you need more information to solve the problem, ask clarifying questions to the user. 
+    If you have tried to solve the problem and the user indicates the problem is not solved, delegate the task to the `delegation_agent`.
     Be concise and clear in your solution and questions.""",
     tools=[current_ticket_information],
+    sub_agents=[delegation_agent],
 )
