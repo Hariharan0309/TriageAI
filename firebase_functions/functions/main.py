@@ -229,6 +229,7 @@ def interact(req: https_fn.Request) -> https_fn.Response:
         user_id = request_json['user_id']
         session_id = request_json['session_id']
         user_query = request_json['user_query']
+        status = request_json.get('status')
 
         db = firestore.Client(project="valued-mediator-461216-k7", database="triageai")
 
@@ -251,6 +252,12 @@ def interact(req: https_fn.Request) -> https_fn.Response:
             "timestamp": datetime.now(),
         }
         interaction_ref.update({"messages": firestore.ArrayUnion([user_message])})
+
+        if status == "assigned":
+            response_data = json.dumps({
+                "agent_response": ""
+            })
+            return https_fn.Response(response_data, mimetype="application/json", headers=headers)
 
         # Update the working_ticket in the session state
         session_ref = db.collection(SESSIONS_COLLECTION).document(session_id)
@@ -282,6 +289,9 @@ def interact(req: https_fn.Request) -> https_fn.Response:
             "timestamp": datetime.now(),
         }
         interaction_ref.update({"messages": firestore.ArrayUnion([agent_message])})
+
+        if 'timestamp' in agent_message and hasattr(agent_message['timestamp'], 'isoformat'):
+            agent_message['timestamp'] = agent_message['timestamp'].isoformat()
 
         response_data = json.dumps({
             "agent_response": agent_message
@@ -339,4 +349,181 @@ def get_interaction_history(req: https_fn.Request) -> https_fn.Response:
 
     except Exception as e:
         print(f"An error occurred in get_interaction_history: {e}")
+        return https_fn.Response(f"An internal error occurred: {e}", status=500, headers=headers)
+
+@https_fn.on_request()
+def technician_login(req: https_fn.Request) -> https_fn.Response:
+    """
+    HTTP Cloud Function to add or retrieve a technician and retrieve ticket information.
+    """
+    # Set CORS headers
+    if req.method == "OPTIONS":
+        headers = {
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type, Authorization",
+            "Access-Control-Max-Age": "3600",
+        }
+        return https_fn.Response("", headers=headers, status=204)
+
+    headers = {
+        "Access-Control-Allow-Origin": "*",
+    }
+
+    try:
+        request_json = req.get_json(silent=True)
+        if not request_json or 'technician_id' not in request_json:
+            return https_fn.Response("Error: Please provide 'technician_id' in the JSON body.", status=400, headers=headers)
+
+        technician_id = request_json['technician_id']
+
+        db = firestore.Client(project="valued-mediator-461216-k7", database="triageai")
+
+        # Check if technician exists
+        technician_ref = db.collection('Technicians').document(technician_id)
+        technician_doc = technician_ref.get()
+        ticket_data = {}
+
+        if technician_doc.exists:
+            technician_data = technician_doc.to_dict()
+            ticket_id = technician_data.get('ticket_id')
+            if ticket_id:
+                ticket_ref = db.collection('tickets').document(ticket_id)
+                ticket_doc = ticket_ref.get()
+                if ticket_doc.exists:
+                    ticket_data = ticket_doc.to_dict()
+        else:
+            # Create new technician
+            technician_data = {
+                "technician_name": request_json.get('technician_name'),
+                "field_of_expertise": request_json.get('field_of_expertise'),
+                "ticket_id": None,
+                "last_assigned_time": None,
+                "tickets_completed": 0,
+                "tickets_reopened": 0,
+                "avg_customer_satisfaction": 0,
+                "created_at": datetime.now(),
+            }
+            technician_ref.set(technician_data)
+
+        # Convert timestamps to strings
+        if 'created_at' in technician_data and hasattr(technician_data['created_at'], 'isoformat'):
+            technician_data['created_at'] = technician_data['created_at'].isoformat()
+
+        if 'last_assigned_time' in technician_data and hasattr(technician_data['last_assigned_time'], 'isoformat'):
+            technician_data['last_assigned_time'] = technician_data['last_assigned_time'].isoformat()
+        
+        if 'last_update_time' in ticket_data and hasattr(ticket_data['last_update_time'], 'isoformat'):
+            ticket_data['last_update_time'] = ticket_data['last_update_time'].isoformat()
+
+        response_data = json.dumps({
+            "technician": technician_data,
+            "ticket": ticket_data,
+        })
+        return https_fn.Response(response_data, mimetype="application/json", headers=headers)
+
+    except Exception as e:
+        print(f"An error occurred in technician_login: {e}")
+        return https_fn.Response(f"An internal error occurred: {e}", status=500, headers=headers)
+
+@https_fn.on_request()
+def technician_interact(req: https_fn.Request) -> https_fn.Response:
+    """
+    HTTP Cloud Function to handle interactions with technicians.
+    """
+    # Set CORS headers
+    if req.method == "OPTIONS":
+        headers = {
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type, Authorization",
+            "Access-Control-Max-Age": "3600",
+        }
+        return https_fn.Response("", headers=headers, status=204)
+
+    headers = {
+        "Access-Control-Allow-Origin": "*",
+    }
+
+    try:
+        request_json = req.get_json(silent=True)
+        if not request_json or not all(k in request_json for k in ['technician_id', 'message', 'interaction_id']):
+            return https_fn.Response("Error: Please provide 'technician_id', 'message', and 'interaction_id' in the JSON body.", status=400, headers=headers)
+
+        technician_id = request_json['technician_id']
+        message = request_json['message']
+        interaction_id = request_json['interaction_id']
+
+        db = firestore.Client(project="valued-mediator-461216-k7", database="triageai")
+
+        interaction_ref = db.collection('interactions').document(interaction_id)
+
+        # Save technician's message
+        technician_message = {
+            "author": technician_id,
+            "content": message,
+            "timestamp": datetime.now(),
+        }
+        interaction_ref.update({"messages": firestore.ArrayUnion([technician_message])})
+
+        response_data = json.dumps({
+            "status": "success",
+            "message": "Message added to interaction."
+        })
+        return https_fn.Response(response_data, mimetype="application/json", headers=headers)
+
+    except Exception as e:
+        print(f"An error occurred in technician_interact: {e}")
+        return https_fn.Response(f"An internal error occurred: {e}", status=500, headers=headers)
+
+@https_fn.on_request()
+def close_ticket(req: https_fn.Request) -> https_fn.Response:
+    """
+    HTTP Cloud Function to close a ticket and update the assigned technician's data.
+    """
+    # Set CORS headers
+    if req.method == "OPTIONS":
+        headers = {
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type, Authorization",
+            "Access-Control-Max-Age": "3600",
+        }
+        return https_fn.Response("", headers=headers, status=204)
+
+    headers = {
+        "Access-Control-Allow-Origin": "*",
+    }
+
+    try:
+        request_json = req.get_json(silent=True)
+        if not request_json or 'ticket_id' not in request_json:
+            return https_fn.Response("Error: Please provide 'ticket_id' in the JSON body.", status=400, headers=headers)
+
+        ticket_id = request_json['ticket_id']
+
+        db = firestore.Client(project="valued-mediator-461216-k7", database="triageai")
+
+        ticket_ref = db.collection('tickets').document(ticket_id)
+        ticket_doc = ticket_ref.get()
+
+        if not ticket_doc.exists:
+            return https_fn.Response(f"Error: Ticket with ID {ticket_id} not found.", status=404, headers=headers)
+
+        ticket_data = ticket_doc.to_dict()
+        ticket_ref.update({"status": "closed"})
+
+        if 'assigned_technician_id' in ticket_data and ticket_data['assigned_technician_id']:
+            technician_id = ticket_data['assigned_technician_id']
+            technician_ref = db.collection('Technicians').document(technician_id)
+            technician_ref.update({"ticket_id": None})
+
+        response_data = json.dumps({
+            "status": "success",
+            "message": f"Ticket {ticket_id} has been closed."
+        })
+        return https_fn.Response(response_data, mimetype="application/json", headers=headers)
+
+    except Exception as e:
+        print(f"An error occurred in close_ticket: {e}")
         return https_fn.Response(f"An internal error occurred: {e}", status=500, headers=headers)

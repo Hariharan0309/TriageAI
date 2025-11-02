@@ -1,2 +1,4 @@
 google-cloud-aiplatform[adk,agent_engines]
 google-cloud-firestore
+python-dotenv
+matplotlib
